@@ -113,6 +113,7 @@ Each check returns a `Result` (a list of them for `check_packages()`, `check_loc
 | `ok` | `True` if no target has a gap |
 | `gaps` | the targets with a gap (`source`, `missing` or `unknown`) |
 | `bundled_versions`, `bundled_version`, `bundled_version_differs` | with `pyodide_locks`: see [Pyodide](#pyodide) |
+| `issues_url` | (after 0.12.0) the package's issue tracker URL from PyPI metadata, or `None` when absent or not on PyPI |
 | `to_dict()` | the package in the shape of a `--json` package entry, keyed by each target's full label (`"3.13 musl-aarch64"`, with the Python even when only one is checked) |
 
 ### Explaining a gap
@@ -138,9 +139,15 @@ why), a result explains the gap the way `--explain` does:
   line shows it: `("app", "pandas", "numpy")`, or `("(dev group)", "pytest")` when a dependency group pulls it in.
   `check_lockfile()` fills it for `uv.lock`, and for `poetry.lock` files older than lock-version 2.1, and
   `check_packages()` and `check_package()` fill it with `deps=True`; it's empty for other inputs.
-- `result.direct` maps each gap target to the direct dependencies that lead to the package, as the table's `(via ...)`
-  names them (`{"win-arm64": ["mcp", "httpx"]}`).
+- `result.direct` (after 0.12.0) maps the same targets to the direct dependencies that lead to the package, as the
+  table's `(via ...)` names them: `result.direct[target]` is a tuple such as `("mcp", "httpx")`, and
+  `to_dict(explain=True)` gives `{"3.13 win-arm64": ["mcp", "httpx"]}`. It's empty for a direct dependency and for
+  an input with no dependency graph: `check_lockfile()` fills it for `uv.lock`, and for `poetry.lock` files older than
+  lock-version 2.1, and `check_packages()` and `check_package()` fill it with `deps=True`.
+- `result.issues_url` (after 0.12.0) is the package's issue tracker link from PyPI metadata, or `None` when absent, for
+  private packages, or when pointing at another index.
 
-`rejected` and `reasons` are worked out when first read; `via` and `direct` are filled in when the result is made.
-`to_dict()` leaves all four out, and `to_dict(explain=True)` adds `"rejected"`, `"via"` and `"direct"` in the same
-shapes as `wheelgap --json --explain`: each keyed by target label, `rejected` as `{"file", "reason"}` objects.
+`rejected` and `reasons` are worked out when first read; `via`, `direct` and `issues_url` are filled in when the result
+is made. `to_dict()` leaves them out, and `to_dict(explain=True)` adds `"rejected"`, `"via"`, `"direct"` and
+`"issues_url"` in the same shapes as `wheelgap --json --explain`: the first three keyed by target label, `rejected` as
+`{"file", "reason"}` objects, and `issues_url` as a string or `null`.

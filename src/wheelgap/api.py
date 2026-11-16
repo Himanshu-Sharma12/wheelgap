@@ -7,7 +7,8 @@ result = wheelgap.check_package("numpy", "2.3.4", targets=targets)
 result.ok                   # True if every target has a wheel
 result.statuses[targets[1]] # Status.WHEEL / SOURCE / MISSING / ...
 result.reasons.get(targets[1])  # for a source or missing target: the wheels --explain lists and why they don't fit
-result.to_dict()            # JSON-friendly, keyed by "3.13 musl-aarch64"; explain=True adds rejected, via and direct
+result.to_dict()            # JSON-friendly, keyed by "3.13 musl-aarch64"
+result.to_dict(explain=True)  # also rejected, via, direct and issues_url, as wheelgap --json --explain gives them
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import ClassVar, Literal, overload
 
+from . import origin, pypi
 from .check import Row, Status, check, explain, explain_lines, status_for, wheel_tags
 from .deps import resolve_deps
 from .offline import require_offline
@@ -107,6 +109,7 @@ class Result:
     # The direct dependencies that lead to each gap target, as the table's (via ...) names them.
     # Only check_lockfile() and check_packages(deps=True) fill it, and only for inputs with a dependency graph.
     direct: dict[Target, tuple[str, ...]] = field(default_factory=dict)
+    issues_url: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -164,9 +167,10 @@ class Result:
         }
 
     def to_dict(self, explain: bool = False) -> dict[str, object]:
-        """JSON-friendly, keyed by target label. explain=True adds "rejected", "via" and "direct" as
+        """JSON-friendly, keyed by target label. explain=True adds "rejected", "via", "direct" and "issues_url" as
         `wheelgap --json --explain` does: each SOURCE or MISSING target's rejected wheels as {"file", "reason"}
-        objects, its dependency path where there is one, and the direct dependencies that lead to each gap."""
+        objects, its dependency path where there is one, the direct dependencies that lead to each gap, and the
+        package's issue tracker URL."""
         out: dict[str, object] = {
             "name": self.name,
             "version": self.version,
@@ -186,7 +190,30 @@ class Result:
             }
             out["via"] = {t.label(True): list(path) for t, path in self.via.items()}
             out["direct"] = {t.label(True): list(names) for t, names in self.direct.items()}
+            out["issues_url"] = self.issues_url
         return out
+
+
+def explain_issues_urls(
+    items: Iterable[Row | Package],
+    sources: list[Source],
+    index_url: str | None = None,
+) -> dict[int, str | None]:
+    """Issues tracker URLs for explained packages that pass the PyPI origin rule, by id(package)."""
+    item_list = list(items)
+    pkgs = [it.package if isinstance(it, Row) else it for it in item_list]
+    if origin.other_index(index_url) is not None:
+        return {id(p): None for p in pkgs}
+    private = origin.private_names(sources, simple_index=index_url)
+    source_of = {id(p): s for s in sources for original in s.packages for p in original.variants}
+    out: dict[int, str | None] = {}
+    for p in pkgs:
+        src = source_of.get(id(p))
+        if src and origin.known_pypi(p, src, simple_index=index_url, private=private):
+            out[id(p)] = pypi.extract_issues_url(p.project_urls, p.home_page)
+        else:
+            out[id(p)] = None
+    return out
 
 
 def _result(
@@ -195,6 +222,7 @@ def _result(
     pyodide_locks: Sequence[PyodideLock] = (),
     via: dict[Target, list[str]] | None = None,
     direct_via: dict[Target, tuple[str, ...]] | None = None,
+    issues_url: str | None = None,
 ) -> Result:
     applied = [lock for lock in pyodide_locks if any(bundles(lock, pkg.key, t, s) for t, s in statuses.items())]
     statuses = {
@@ -225,6 +253,7 @@ def _result(
         direct={
             t: tuple(dict.fromkeys(direct_via[t])) for t, s in statuses.items() if s in _EXPLAINED and direct_via.get(t)
         },
+        issues_url=issues_url,
     )
     object.__setattr__(result, "_resolutions", pkg.resolutions)
     return result
@@ -270,15 +299,20 @@ def check_packages(
     if deps:
         if urls := [p.name for p in pkgs if "@" in p.name or "://" in p.name]:
             raise ValueError(f"deps=True looks names up on PyPI, so it can't check a URL: {', '.join(urls)}")
-        source = Source("api", pkgs, specs=[p.name if p.version is None else f"{p.name}=={p.version}" for p in pkgs])
+        source = Source(
+            "api", pkgs, specs=[p.name if p.version is None else f"{p.name}=={p.version}" for p in pkgs], pypi_only=True
+        )
         resolve_deps(source, targets)
         fill_all(source.packages, workers=workers, pythons=pythons)
+        rows = [r for r in check([source], targets) if r.needed]
+        issues = explain_issues_urls(rows, [source])
         return [
-            _result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via)
-            for r in check([source], targets)
-            if r.needed
+            _result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via, issues.get(id(r.package)))
+            for r in rows
         ]
+    source = Source("api", pkgs, pypi_only=True)
     fill_all(pkgs, workers=workers, pythons=pythons)
+    issues = explain_issues_urls(pkgs, [source])
     return [
         _result(
             p,
@@ -288,6 +322,7 @@ def check_packages(
                 for resolved in [p.resolutions.get(f"{t.major}.{t.minor}", p)]
             },
             pyodide_locks,
+            issues_url=issues.get(id(p)),
         )
         for p in pkgs
     ]
@@ -419,4 +454,12 @@ def _check_lockfile(
     if not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]
-    return [_result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via) for r in rows], source, rows
+    issues = explain_issues_urls(rows, [source])
+    return (
+        [
+            _result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via, issues.get(id(r.package)))
+            for r in rows
+        ],
+        source,
+        rows,
+    )
