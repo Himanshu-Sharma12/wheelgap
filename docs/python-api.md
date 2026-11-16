@@ -138,7 +138,9 @@ why), a result explains the gap the way `--explain` does:
   line shows it: `("app", "pandas", "numpy")`, or `("(dev group)", "pytest")` when a dependency group pulls it in.
   `check_lockfile()` fills it for `uv.lock`, and for `poetry.lock` files older than lock-version 2.1, and
   `check_packages()` and `check_package()` fill it with `deps=True`; it's empty for other inputs.
+- `result.direct` maps each gap target to the direct dependencies that lead to the package, as the table's `(via ...)`
+  names them (`{"win-arm64": ["mcp", "httpx"]}`).
 
-`rejected` and `reasons` are worked out when first read; `via` is filled in when the result is made. `to_dict()` leaves
-all three out, and `to_dict(explain=True)` adds `"rejected"` and `"via"` in the same shapes as
-`wheelgap --json --explain`: each keyed by target label, `rejected` as `{"file", "reason"}` objects.
+`rejected` and `reasons` are worked out when first read; `via` and `direct` are filled in when the result is made.
+`to_dict()` leaves all four out, and `to_dict(explain=True)` adds `"rejected"`, `"via"` and `"direct"` in the same
+shapes as `wheelgap --json --explain`: each keyed by target label, `rejected` as `{"file", "reason"}` objects.

@@ -88,6 +88,7 @@ def test_check_package_offline_with_files():
             ]
         },
         "via": {},
+        "direct": {},
     }
     json.dumps(result.to_dict(explain=True))  # JSON-friendly
 
@@ -492,8 +493,12 @@ def test_check_lockfile_reasons_and_via(fake_pypi, tmp_path):
         "3.14t linux-x86_64": ["app", "abi3lib"],
         "3.14t win-amd64": ["app", "mid", "abi3lib"],
     }
+    assert data["direct"] == {
+        "3.13 win-amd64": ["mid"],
+        "3.14t win-amd64": ["mid"],
+    }
     assert data["rejected"]["3.14t linux-x86_64"] == [{"file": ABI3_WHEEL, "reason": abi3}]
-    assert "via" not in lib.to_dict() and "rejected" not in lib.to_dict()
+    assert "via" not in lib.to_dict() and "rejected" not in lib.to_dict() and "direct" not in lib.to_dict()
     json.dumps(data)
 
 
@@ -511,7 +516,11 @@ def test_explain_matches_the_command_line(capsys, fake_pypi, fixtures):
     assert "can't build packages from source" in results["nativeext"].reasons[targets[1]]
     for r in results.values():
         data = r.to_dict(explain=True)
-        assert (data["rejected"], data["via"]) == (packages[r.name]["rejected"], packages[r.name]["via"])
+        assert (data["rejected"], data["via"], data["direct"]) == (
+            packages[r.name]["rejected"],
+            packages[r.name]["via"],
+            packages[r.name]["direct"],
+        )
         for t, text in r.reasons.items():
             block = out.split(f"{r.name} {r.version} on {t.label(True)}: ", 1)[1].split("\n\n", 1)[0]
             lines = [line for line in block.split("\n")[1:] if not line.startswith(("  via: ", "  build needs: "))]
@@ -553,7 +562,12 @@ def test_yanked_wheel_is_named_not_missing(fake_pypi):
 def test_via_is_empty_without_a_graph(fake_pypi, tmp_path):
     (tmp_path / "requirements.txt").write_text("nowheels==0.9\n")
     (result,) = wheelgap.check_lockfile(tmp_path / "requirements.txt", wheelgap.make_targets("3.13", "linux-x86_64"))
-    assert result.via == {} and result.to_dict(explain=True)["via"] == {}
+    assert (
+        result.via == {}
+        and result.direct == {}
+        and result.to_dict(explain=True)["via"] == {}
+        and result.to_dict(explain=True)["direct"] == {}
+    )
     assert list(result.reasons.values()) == ["no wheels published for this version"]
     assert wheelgap.check_package("nowheels", "0.9", wheelgap.make_targets("3.13", "linux-x86_64")).via == {}
 
@@ -615,9 +629,11 @@ def test_check_packages_deps_checks_what_the_packages_install():
     assert sorted(rows) == ["app", "crypt", "lib", "winonly"]
     assert rows["crypt"].statuses == {WIN: Status.SOURCE, LIN: Status.WHEEL}
     assert rows["crypt"].via == {WIN: ("app", "lib", "crypt")}  # as --explain: the path to each gap
+    assert rows["crypt"].direct == {WIN: ("app",)}
     assert rows["crypt"].to_dict(explain=True)["via"] == {WIN.label(True): ["app", "lib", "crypt"]}
+    assert rows["crypt"].to_dict(explain=True)["direct"] == {WIN.label(True): ["app"]}
     assert rows["winonly"].statuses == {WIN: Status.WHEEL, LIN: Status.NOT_NEEDED}  # only Windows installs it
-    assert all(r.via == {} for r in wheelgap.check_packages([("app", "1.0")], [WIN, LIN]))
+    assert all(r.via == {} and r.direct == {} for r in wheelgap.check_packages([("app", "1.0")], [WIN, LIN]))
     assert [r.name for r in wheelgap.check_packages(["app"], [WIN])] == ["app"]
 
 
@@ -640,3 +656,24 @@ def test_check_packages_deps_raises_the_source_error_the_cli_reports():
 def test_check_packages_deps_refuses_a_url():
     with pytest.raises(ValueError, match="can't check a URL: foo @ https://example.org/foo-1.0.tar.gz"):
         wheelgap.check_packages(["foo @ https://example.org/foo-1.0.tar.gz"], deps=True)
+
+
+def test_check_lockfile_direct_matches_cli_json_explain(capsys, fake_pypi, tmp_path):
+    (tmp_path / "uv.lock").write_text(LOCK_ABI3, encoding="utf-8")
+    targets = wheelgap.make_targets(python="3.13,3.14t", platforms=["linux-x86_64", "win-amd64"])
+    api_results = {r.name: r for r in wheelgap.check_lockfile(tmp_path / "uv.lock", targets)}
+    main(
+        [
+            str(tmp_path / "uv.lock"),
+            "-p",
+            "3.13,3.14t",
+            "-t",
+            "linux-x86_64,win-amd64",
+            "--json",
+            "--explain",
+            "--offline",
+        ]
+    )
+    cli_packages = {p["name"]: p for p in json.loads(capsys.readouterr().out)["packages"]}
+    for name, result in api_results.items():
+        assert result.to_dict(explain=True)["direct"] == cli_packages[name]["direct"]

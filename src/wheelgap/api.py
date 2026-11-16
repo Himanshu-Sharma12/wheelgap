@@ -7,7 +7,7 @@ result = wheelgap.check_package("numpy", "2.3.4", targets=targets)
 result.ok                   # True if every target has a wheel
 result.statuses[targets[1]] # Status.WHEEL / SOURCE / MISSING / ...
 result.reasons.get(targets[1])  # for a source or missing target: the wheels --explain lists and why they don't fit
-result.to_dict()            # JSON-friendly, keyed by "3.13 musl-aarch64"; explain=True adds rejected and via
+result.to_dict()            # JSON-friendly, keyed by "3.13 musl-aarch64"; explain=True adds rejected, via and direct
 """
 
 from __future__ import annotations
@@ -104,6 +104,9 @@ class Result:
     _resolutions: ClassVar[Mapping[str, Package]] = MappingProxyType({})
     # Each applicable Pyodide lock may ship a different version for its Python.
     bundled_versions: dict[str, str] = field(default_factory=dict)
+    # The direct dependencies that lead to each gap target, as the table's (via ...) names them.
+    # Only check_lockfile() and check_packages(deps=True) fill it, and only for inputs with a dependency graph.
+    direct: dict[Target, tuple[str, ...]] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -161,9 +164,9 @@ class Result:
         }
 
     def to_dict(self, explain: bool = False) -> dict[str, object]:
-        """JSON-friendly, keyed by target label. explain=True adds "rejected" and "via" as `wheelgap --json --explain`
-        does: each SOURCE or MISSING target's rejected wheels as {"file", "reason"} objects, and its dependency path
-        where there is one."""
+        """JSON-friendly, keyed by target label. explain=True adds "rejected", "via" and "direct" as
+        `wheelgap --json --explain` does: each SOURCE or MISSING target's rejected wheels as {"file", "reason"}
+        objects, its dependency path where there is one, and the direct dependencies that lead to each gap."""
         out: dict[str, object] = {
             "name": self.name,
             "version": self.version,
@@ -182,6 +185,7 @@ class Result:
                 for t, rejected in self.rejected.items()
             }
             out["via"] = {t.label(True): list(path) for t, path in self.via.items()}
+            out["direct"] = {t.label(True): list(names) for t, names in self.direct.items()}
         return out
 
 
@@ -190,6 +194,7 @@ def _result(
     statuses: dict[Target, Status],
     pyodide_locks: Sequence[PyodideLock] = (),
     via: dict[Target, list[str]] | None = None,
+    direct_via: dict[Target, tuple[str, ...]] | None = None,
 ) -> Result:
     applied = [lock for lock in pyodide_locks if any(bundles(lock, pkg.key, t, s) for t, s in statuses.items())]
     statuses = {
@@ -199,6 +204,7 @@ def _result(
     unique_versions = set(bundled_versions.values())
     shared_version = next(iter(unique_versions)) if len(unique_versions) == 1 else None
     via = via or {}
+    direct_via = direct_via or {}
     result = Result(
         pkg.name,
         pkg.version,
@@ -216,6 +222,9 @@ def _result(
         pkg.no_binary,
         pkg.only_binary,
         bundled_versions=bundled_versions,
+        direct={
+            t: tuple(dict.fromkeys(direct_via[t])) for t, s in statuses.items() if s in _EXPLAINED and direct_via.get(t)
+        },
     )
     object.__setattr__(result, "_resolutions", pkg.resolutions)
     return result
@@ -264,7 +273,11 @@ def check_packages(
         source = Source("api", pkgs, specs=[p.name if p.version is None else f"{p.name}=={p.version}" for p in pkgs])
         resolve_deps(source, targets)
         fill_all(source.packages, workers=workers, pythons=pythons)
-        return [_result(r.package, dict(r.results), pyodide_locks, r.via) for r in check([source], targets) if r.needed]
+        return [
+            _result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via)
+            for r in check([source], targets)
+            if r.needed
+        ]
     fill_all(pkgs, workers=workers, pythons=pythons)
     return [
         _result(
@@ -406,4 +419,4 @@ def _check_lockfile(
     if not online and not offline and pythons_outside_lock(source, targets):
         recheck_lock(source.packages)
     rows: list[Row] = [r for r in check([source], targets) if r.needed]
-    return [_result(r.package, dict(r.results), pyodide_locks, r.via) for r in rows], source, rows
+    return [_result(r.package, dict(r.results), pyodide_locks, r.via, r.direct_via) for r in rows], source, rows
